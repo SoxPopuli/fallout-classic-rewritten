@@ -4,6 +4,7 @@ mod tests;
 pub mod bit_reader;
 pub mod vec_2d;
 pub mod stream;
+pub mod readers;
 
 pub use self::{
     bit_reader::BitReader,

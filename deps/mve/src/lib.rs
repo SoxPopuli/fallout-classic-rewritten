@@ -1,17 +1,26 @@
+#![allow(unused)]
+
 pub mod error;
 
 #[cfg(test)]
 mod tests;
 
-pub use error::Error;
+pub use error::{ 
+    Error::{ self, * },
+    FromIoError
+};
 
-use common::{ read_num, read_bytes };
+use common::{ 
+    read_num, 
+    read_bytes,
+    readers::{ FromBytes, ReadMode },
+};
+
 use std::{
     io::{Cursor, Read}, 
     ops::{ Add, Sub },
     cell::Cell,
 };
-use crate::Error::FileError;
 
 use itertools::Itertools;
 
@@ -19,6 +28,13 @@ macro_rules! read_mve {
     ($data:expr, $t:ty) => {{
         read_num!($data, $t, le)
     }};
+}
+
+pub(crate) fn read_type<T, const N: usize>(data: &mut impl Read) -> Result<T, Error> where T: FromBytes<N> {
+    match common::readers::read_type(ReadMode::LE, data) {
+        Ok(o) => Ok(o),
+        Err(e) => Err(ReadError(e)),
+    }
 }
 
 struct DeltaIterator<T, I> where T: Add<Output = T> + Copy, I: Iterator<Item = T> {
@@ -65,7 +81,7 @@ impl<T: Add<Output = T> + Copy, I: Iterator<Item = T>> IntoDeltaIterator<T> for 
     }
 }
 
-fn uncompress_audio(data: &[i8]) -> Option<Vec<i16>> {
+fn uncompress_audio(initial_value: i16, data: &[i8]) -> Option<(i16, Vec<i16>)> {
     const DELTA_CODINGS: [i16; 256] = 
         [
              0,      1,      2,      3,      4,      5,      6,      7,      8,      9,     10,     11,     12,     13,     14,     15,
@@ -77,7 +93,7 @@ fn uncompress_audio(data: &[i8]) -> Option<Vec<i16>> {
             4373,   4772,   5208,   5683,   6202,   6767,   7385,   8059,   8794,   9597,  10472,  11428,  12471,  13609,  14851,  16206,
             17685,  19298,  21060,  22981,  25078,  27367,  29864,  32589, -29973, -26728, -23186, -19322, -15105, -10503,  -5481,     -1,
                 1,      1,   5481,  10503,  15105,  19322,  23186,  26728,  29973, -32589, -29864, -27367, -25078, -22981, -21060, -19298,
-        -17685, -16206, -14851, -13609, -12471, -11428, -10472,  -9597,  -8794,  -8059,  -7385,  -6767,  -6202,  -5683,  -5208,  -4772,
+            -17685, -16206, -14851, -13609, -12471, -11428, -10472,  -9597,  -8794,  -8059,  -7385,  -6767,  -6202,  -5683,  -5208,  -4772,
             -4373,  -4008,  -3672,  -3365,  -3084,  -2826,  -2590,  -2373,  -2175,  -1993,  -1826,  -1673,  -1534,  -1405,  -1288,  -1180,
             -1081,   -991,   -908,   -832,   -763,   -699,   -640,   -587,   -538,   -493,   -452,   -414,   -379,   -348,   -318,   -292,
             -267,   -245,   -225,   -206,   -189,   -173,   -158,   -145,   -133,   -122,   -112,   -102,    -94,    -86,    -79,    -72,
@@ -85,15 +101,16 @@ fn uncompress_audio(data: &[i8]) -> Option<Vec<i16>> {
             -32,    -31,    -30,    -29,    -28,    -27,    -26,    -25,    -24,    -23,    -22,    -21,    -20,    -19,    -18,    -17,
             -16,    -15,    -14,    -13,    -12,    -11,    -10,     -9,     -8,     -7,     -6,     -5,     -4,     -3,     -2,     -1
         ];
-    
 
-    Some(
-        data.into_iter()
-        .map(|i| *i as i16)
-        .deltas()?
-        .map(|i| DELTA_CODINGS[i as usize])
-        .collect()
-    )
+    let (last_delta, deltas) = apply_deltas(initial_value, data);
+    let mut uncompressed_values = Vec::with_capacity(deltas.len());
+
+    for d in deltas {
+        let value = DELTA_CODINGS.get(d as usize)?;
+        uncompressed_values.push(*value);
+    }
+
+    Some((last_delta, uncompressed_values))
 }
 
 #[derive(Debug)]
@@ -113,11 +130,6 @@ fn unwrap_inner<T, E>(r: Result< Result<T, E>, E >) -> Result<T, E> {
 fn get_remaining<T>(c: &Cursor<T>) -> &[u8] where T: AsRef<[u8]> {
     let pos = c.position() as usize;
     &c.get_ref().as_ref()[pos..]
-}
-
-fn unsigned_to_signed(data: &[u8]) -> Vec<i8> {
-    let ptr = data.as_ptr() as *mut i8;
-    unsafe{ Vec::from_raw_parts(ptr, data.len(), data.len()) }
 }
 
 #[derive(Debug)]
@@ -212,9 +224,11 @@ impl<'a> Iterator for OpcodeIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if (self.data.position() as usize) < self.length {
-            let len = read_mve!(self.data, u16)?;
-            let type_ = read_mve!(self.data, u8)?;
-            let ver = read_mve!(self.data, u8)?;
+            let data = &mut self.data;
+
+            let len: u16 = read_type(data).ok()?;
+            let type_ = read_type(data).ok()?;
+            let ver = read_type(data).ok()?;
 
             let mut op_data = vec![0u8; len as usize];
             self.data.read_exact(&mut op_data).ok()?;
@@ -296,8 +310,8 @@ impl Opcode {
             0x00 => Some(Self::EndOfStream),
             0x01 => Some(Self::EndOfChunk),
             0x02 => Some(Self::CreateTimer { 
-                rate: read_mve!(data, u32)?,
-                subdivision: read_mve!(data, u16)?,
+                rate: read_type(&mut data).ok()?,
+                subdivision: read_type(&mut data).ok()?,
             }),
 
             0x03 => Self::read_init_audio_buffers(&mut data, ver),
@@ -322,7 +336,9 @@ impl Opcode {
                 let stream_len = read_mve!(data, u16)?;
                 
                 let version = if t == 0x08 {
-                    let data = unsigned_to_signed(get_remaining(&data));
+                    let remaining: &[i8] = 
+                        unsafe { std::mem::transmute(get_remaining(&data)) };
+                    let data = Vec::from_iter(remaining.iter().copied());
                     AudioFrame::Data { seq_index, stream_mask, stream_len, data }
                 } else {
                     AudioFrame::Silence { seq_index, stream_mask, stream_len }
@@ -487,12 +503,22 @@ fn read_chunk_rec(mut acc: Vec<Chunk>, data: &[u8]) -> Vec<Chunk> {
     }
 }
 
+fn apply_deltas(mut delta: i16, values: &[i8]) -> (i16, Vec<i16>) {
+    let mut output = Vec::with_capacity(values.len());
+
+    for v in values {
+        delta += *v as i16;
+        output.push(delta);
+    }
+
+    (delta, output)
+}
 
 pub fn read_mve(data: &[u8]) -> Result<(), Error> {
     // let mut data = std::io::BufReader::new(data);
     let mut data = Cursor::new(data);
 
-    let file_type = read_bytes!(data, 20).map_err(|_| FileError)?;
+    let file_type = read_bytes!(data, 20).to()?;
     let magic_bytes = (0..3)
         .filter_map(|_| read_bytes!(data, 2).ok())
         .map(|bytes| u16::from_le_bytes(bytes))
@@ -509,7 +535,9 @@ pub fn read_mve(data: &[u8]) -> Result<(), Error> {
         data: Cursor::new(rest)
     };
 
-    let _c = chunks.collect::<Vec<_>>();
+    chunks
+    .map(|x| format!("{:?}", x.chunk_type))
+    .for_each(|x| println!("{}", x));
 
     todo!()
 }
