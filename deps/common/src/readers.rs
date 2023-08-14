@@ -42,10 +42,7 @@ impl_from_bytes!(f64);
 
 impl FromBytes<1> for bool {
     fn from_bytes_ne(bytes: [u8; 1]) -> Self {
-        match bytes[0] {
-            0 => false,
-            _ => true,
-        }
+        bytes[0] != 0
     }
     fn from_bytes_be(bytes: [u8; 1]) -> Self {
         Self::from_bytes_ne(bytes)
