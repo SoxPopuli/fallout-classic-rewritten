@@ -1,9 +1,5 @@
 use std::{ 
-    io::{ stdin, Read, Cursor, stdout, Write },
-    collections::hash_map::Entry,
-    env::{ Args, args },
-    fs::File,
-    path::Path,
+    collections::hash_map::Entry, env::{ args, Args }, fs::File, io::{ stdin, stdout, Cursor, Read, Write }, path::Path, process::exit
 };
 
 use dat::{ 
@@ -80,10 +76,15 @@ fn main()
         return;
     }
 
-    //println!("{:?}", options.input);
-    //println!("{:?}", options.output);
+    let input = match options.input {
+        Some(x) => x,
+        None => {
+            print_help();
+            exit(1);
+        }
+    };
 
-    let input = options.input.expect("missing input");
+
     let file = File::open(input).unwrap();
 
     let dat = DatFile::open(file).unwrap();

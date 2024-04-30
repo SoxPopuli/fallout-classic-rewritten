@@ -98,7 +98,7 @@ fn open_mve(file: File) {
 }
 
 fn inspect_mve(file: File) {
-    let mve = mve::MveFile::open(file).unwrap();
+    //let mve = mve::MveFile::open(file).unwrap();
 }
 
 fn open_acm(file: File) {
