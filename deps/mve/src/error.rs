@@ -1,13 +1,10 @@
 use std::fmt::{Debug, Display, Formatter, write};
 use std::io::Error as IoError;
 
-use winnow::error::{ ErrMode, ContextError };
-
 #[derive(Debug)]
 pub enum Error {
     FileError,
     ReadError(IoError),
-    ParseError(ErrMode<ContextError>)
 }
 
 impl Display for Error {

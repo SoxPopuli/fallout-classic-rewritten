@@ -15,4 +15,5 @@ common = { path = "../common" }
 itertools = "0.10.5"
 nom = "7.1.3"
 tailcall = "0.1.6"
+tap = "1.0.1"
 winnow = "0.6.7" 

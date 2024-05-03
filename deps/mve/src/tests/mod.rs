@@ -15,5 +15,15 @@ const TEST_DATA: &'static [u8] =
 
 #[test]
 fn header_parse() {
-    parse_header(&mut TEST_DATA).unwrap();
+    parse_header(TEST_DATA).unwrap();
+}
+
+#[test]
+fn chunk_parse() {
+    let data: &[u8] = &[ 0x24, 0x03, 0x02, 0x00 ];
+
+    let (_, chunk) = parse_chunk(data).unwrap();
+
+    println!("{:#?}", chunk);
+    todo!()
 }
