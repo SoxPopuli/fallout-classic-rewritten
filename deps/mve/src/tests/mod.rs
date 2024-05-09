@@ -7,10 +7,10 @@ use crate::*;
 const TEST_DATA: &'static [u8] =
     include_bytes!("../../../../intro.mve");
 
-//#[test]
-//fn no_errors() {
-//    read_mve(TEST_DATA).unwrap();
-//}
+#[test]
+fn parse_test() {
+    read_mve(TEST_DATA).unwrap();
+}
 
 
 #[test]
@@ -20,10 +20,18 @@ fn header_parse() {
 
 #[test]
 fn chunk_parse() {
-    let data: &[u8] = &[ 0x24, 0x03, 0x02, 0x00 ];
+    let data: &[u8] = &[ 0x00, 0x00, 0x02, 0x00 ];
 
     let (_, chunk) = parse_chunk(data).unwrap();
 
-    println!("{:#?}", chunk);
-    todo!()
+    assert_eq!(chunk, Chunk { length: 0, typ: ChunkType::InitialiseVideo, body: &[] });
+}
+
+#[test]
+fn pair_test() {
+    let pair = (1, 2);
+
+    let pair2 = pair.map_second(|x| x * 2);
+
+    assert_eq!(pair2, (1, 4))
 }

@@ -3,63 +3,19 @@ mod tests;
 
 mod error;
 use error::Error;
-use winnow::combinator::todo;
 
-use std::io::Cursor;
+mod utils;
+use itertools::Itertools;
+use utils::MapPair;
+
+use std::fmt::Debug;
 
 use nom::{
     bytes::complete::take,
-    combinator::{map_res, verify},
-    error::ParseError,
-    IResult, Parser,
+    combinator::{iterator, verify},
+    IResult,
 };
 use tap::Pipe;
-
-trait MapFirst {
-    type A;
-    type B;
-    type E;
-    fn map_first<O>(
-        self,
-        f: impl FnOnce(Self::A) -> O,
-    ) -> Result<(O, Self::B), Self::E>;
-}
-
-impl<A, B, E> MapFirst for Result<(A, B), E> {
-    type A = A;
-    type B = B;
-    type E = E;
-
-    fn map_first<O>(self, f: impl FnOnce(Self::A) -> O) -> Result<(O, B), E> {
-        match self {
-            Ok((a, b)) => Ok((f(a), b)),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-trait MapSecond {
-    type A;
-    type B;
-    type E;
-    fn map_second<O>(
-        self,
-        f: impl FnOnce(Self::B) -> O,
-    ) -> Result<(Self::A, O), Self::E>;
-}
-
-impl<A, B, E> MapSecond for Result<(A, B), E> {
-    type A = A;
-    type B = B;
-    type E = E;
-
-    fn map_second<O>(self, f: impl FnOnce(Self::B) -> O) -> Result<(A, O), E> {
-        match self {
-            Ok((a, b)) => Ok((a, f(b))),
-            Err(e) => Err(e),
-        }
-    }
-}
 
 fn take_n_bytes_checked<'a, 'b>(
     data: &'a [u8],
@@ -84,36 +40,110 @@ fn parse_header(data: &[u8]) -> IResult<&[u8], ()> {
     Ok((data, ()))
 }
 
-#[derive(Debug)]
-struct Chunk {
-    length: u16,
-    typ: u16,
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkType {
+    InitialiseAudio,
+    AudioOnly,
+    InitialiseVideo,
+    Video,
+    Shutdown,
+    End,
 }
 
-fn take2(data: &[u8]) -> IResult<&[u8], [u8; 2]> {
-    let (data, x) = take(2usize)(data)?;
-    let mut output: [u8; 2] = 
-        unsafe {std::mem::MaybeUninit::zeroed().assume_init()};
-    output.copy_from_slice(x);
+impl TryFrom<u16> for ChunkType {
+    type Error = Error;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Self::InitialiseAudio),
+            0x01 => Ok(Self::AudioOnly),
+            0x02 => Ok(Self::InitialiseVideo),
+            0x03 => Ok(Self::Video),
+            0x04 => Ok(Self::Shutdown),
+            0x05 => Ok(Self::End),
+            _ => Err(Error::ChunkError(value)),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct Chunk<'a> {
+    length: u16,
+    typ: ChunkType,
+    body: &'a [u8],
+}
+
+impl std::fmt::Debug for Chunk<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chunk")
+            .field("length", &self.length)
+            .field("typ", &self.typ)
+            .finish()
+    }
+}
+
+impl<'a> Chunk<'a> {
+    fn new(
+        length: u16,
+        typ: u16,
+        data: &'a [u8],
+    ) -> Result<(&'a [u8], Self), Error> {
+        let (data, body) = take(length as usize)(data)?;
+        Chunk {
+            length,
+            typ: typ.try_into()?,
+            body,
+        }
+        .pipe(|x| (data, x))
+        .pipe(Ok)
+    }
+}
+
+fn take_n<const N: usize>(data: &[u8]) -> IResult<&[u8], [u8; N]> {
+    let (data, x) = take(N)(data)?;
+    let mut buffer = std::mem::MaybeUninit::<[u8; N]>::uninit();
+
+    let output;
+    unsafe {
+        let ptr = (*buffer.as_mut_ptr()).as_mut_slice();
+
+        for i in 0..N {
+            ptr[i] = x[i];
+        }
+        output = buffer.assume_init();
+    }
 
     Ok((data, output))
 }
 
+fn take2(data: &[u8]) -> IResult<&[u8], [u8; 2]> {
+    take_n(data)?.pipe(Ok)
+}
+
 fn parse_chunk(data: &[u8]) -> IResult<&[u8], Chunk> {
-    let (data, length) = 
-        take2(data)
-        .map_second(u16::from_le_bytes)?;
+    let (data, length) = take2(data).map_second(u16::from_le_bytes)?;
 
-    let (data, typ) =
-        take2(data)
-        .map_second(u16::from_le_bytes)?;
+    let (data, typ) = take2(data).map_second(u16::from_le_bytes)?;
 
-    Ok((data, Chunk { length, typ }))
+    Chunk::new(length, typ, data)
+        .map_err(|_| {
+            nom::error::Error {
+                input: data,
+                code: nom::error::ErrorKind::TakeUntil,
+            }
+            .pipe(nom::Err::Failure)
+        })?
+        .pipe(Ok)
 }
 
 pub fn read_mve(data: &[u8]) -> Result<(), Error> {
     let (data, ()) = parse_header(data).unwrap();
-    let (data, chunk) = parse_chunk(data).unwrap();
+
+    let chunks = iterator(data, parse_chunk).collect_vec();
+
+    println!("{:#?}", chunks);
+
+    //let (data, chunk) = parse_chunk(data).unwrap();
 
     todo!()
 }
