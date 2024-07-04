@@ -1,12 +1,18 @@
 #[cfg(test)]
 mod tests;
 
+mod audio;
+
 mod error;
+use common::Vec2d;
 use error::Error;
 
 mod utils;
 use itertools::Itertools;
 use utils::MapPair;
+
+mod opcodes;
+use opcodes::{Opcode, OpcodeType};
 
 use std::fmt::Debug;
 
@@ -17,6 +23,30 @@ use nom::{
 };
 use tap::Pipe;
 
+#[derive(Debug, Default)]
+struct VideoSettings {
+    /// How long it takes to advance to the next frame
+    frame_time: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Default)]
+struct Pixel {
+    red: u8,
+    green: u8,
+    blue: u8,
+}
+
+/// Represents a chunk of video data
+/// Data is fetched and decoded in chunks,
+/// to allow for paralell decoding and playing
+#[derive(Debug)]
+struct DecodedChunk {
+    video: common::Vec2d<Pixel>,
+    audio: Vec<i32>,
+}
+
 fn take_n_bytes_checked<'a, 'b>(
     data: &'a [u8],
     n: usize,
@@ -26,20 +56,21 @@ fn take_n_bytes_checked<'a, 'b>(
 }
 
 fn parse_header(data: &[u8]) -> IResult<&[u8], ()> {
-    let (data, _) =
-        take_n_bytes_checked(data, 18usize, "Interplay MVE File".as_bytes())?;
-
-    let (data, _) = take_n_bytes_checked(data, 2usize, &[b'\x1A', b'\0'])?;
-
-    let (data, _) = take_n_bytes_checked(
-        data,
-        6usize,
-        &[0x1a, 0x00, 0x00, 0x01, 0x33, 0x11],
-    )?;
-
-    Ok((data, ()))
+    take_n_bytes_checked(data, 18usize, "Interplay MVE File".as_bytes())
+        .and_then(|(data, _)| {
+            take_n_bytes_checked(data, 2usize, &[b'\x1A', b'\0'])
+        })
+        .and_then(|(data, _)| {
+            take_n_bytes_checked(
+                data,
+                6usize,
+                &[0x1a, 0x00, 0x00, 0x01, 0x33, 0x11],
+            )
+        })
+        .map(|(data, _)| (data, ()))
 }
 
+#[repr(u16)]
 #[derive(Debug, PartialEq, Eq)]
 enum ChunkType {
     InitialiseAudio,
@@ -70,7 +101,7 @@ impl TryFrom<u16> for ChunkType {
 struct Chunk<'a> {
     length: u16,
     typ: ChunkType,
-    body: &'a [u8],
+    data: &'a [u8],
 }
 
 impl std::fmt::Debug for Chunk<'_> {
@@ -88,14 +119,29 @@ impl<'a> Chunk<'a> {
         typ: u16,
         data: &'a [u8],
     ) -> Result<(&'a [u8], Self), Error> {
-        let (data, body) = take(length as usize)(data)?;
+        let (rest, data) = take(length as usize)(data)?;
         Chunk {
             length,
             typ: typ.try_into()?,
-            body,
+            data,
         }
-        .pipe(|x| (data, x))
+        .pipe(|x| (rest, x))
         .pipe(Ok)
+    }
+
+    fn parse(data: &'a [u8]) -> IResult<&[u8], Self> {
+        let (data, length) = take2(data).map_second(u16::from_le_bytes)?;
+        let (data, typ) = take2(data).map_second(u16::from_le_bytes)?;
+
+        Self::new(length, typ, data)
+            .map_err(|_| {
+                nom::error::Error {
+                    input: data,
+                    code: nom::error::ErrorKind::TakeUntil,
+                }
+                .pipe(nom::Err::Failure)
+            })?
+            .pipe(Ok)
     }
 }
 
@@ -116,34 +162,68 @@ fn take_n<const N: usize>(data: &[u8]) -> IResult<&[u8], [u8; N]> {
     Ok((data, output))
 }
 
+fn take_i16(data: &[u8]) -> IResult<&[u8], i16> {
+    take_n(data).map_second(i16::from_le_bytes)
+}
+
+fn take_u16(data: &[u8]) -> IResult<&[u8], u16> {
+    take_n(data).map_second(u16::from_le_bytes)
+}
+
 fn take2(data: &[u8]) -> IResult<&[u8], [u8; 2]> {
     take_n(data)?.pipe(Ok)
 }
 
-fn parse_chunk(data: &[u8]) -> IResult<&[u8], Chunk> {
-    let (data, length) = take2(data).map_second(u16::from_le_bytes)?;
+fn parse_if<T>(
+    predicate: bool,
+    data: &[u8],
+    parser: impl FnOnce(&[u8]) -> IResult<&[u8], T>,
+) -> IResult<&[u8], Option<T>> {
+    if predicate {
+        parser(data).map_second(Some)
+    } else {
+        Ok((data, None))
+    }
+}
 
-    let (data, typ) = take2(data).map_second(u16::from_le_bytes)?;
+fn decode_chunk(
+    video_settings: &mut VideoSettings,
+    chunk: &Chunk,
+) -> Result<(), Error> {
+    let opcodes = &mut iterator(chunk.data, Opcode::parse);
 
-    Chunk::new(length, typ, data)
-        .map_err(|_| {
-            nom::error::Error {
-                input: data,
-                code: nom::error::ErrorKind::TakeUntil,
+    let mut video_buffer = Vec2d::<Pixel>::new(0, 0);
+
+    for op in opcodes {
+        match op.typ {
+            None => {}
+
+            Some(OpcodeType::InitializeVideoBuffers) => {
+                let (data, width) = take_u16(op.data)?;
+                let (data, height) = take_u16(data)?;
+                let (data, count) = parse_if(op.version >= 1, data, take_u16)?;
+                let (data, true_color) =
+                    parse_if(op.version >= 2, data, take_u16)?;
             }
-            .pipe(nom::Err::Failure)
-        })?
-        .pipe(Ok)
+
+            _ => todo!(),
+        }
+    }
+
+    Ok(())
 }
 
 pub fn read_mve(data: &[u8]) -> Result<(), Error> {
     let (data, ()) = parse_header(data).unwrap();
 
-    let chunks = iterator(data, parse_chunk).collect_vec();
+    let mut chunks_iterator = iterator(data, Chunk::parse);
+    let chunks = chunks_iterator.collect_vec();
 
-    println!("{:#?}", chunks);
+    for chunk in chunks {
+        let opcodes = iterator(chunk.data, Opcode::parse).collect_vec();
 
-    //let (data, chunk) = parse_chunk(data).unwrap();
+        println!("{opcodes:?}")
+    }
 
     todo!()
 }

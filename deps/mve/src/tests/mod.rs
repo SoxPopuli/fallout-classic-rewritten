@@ -22,9 +22,9 @@ fn header_parse() {
 fn chunk_parse() {
     let data: &[u8] = &[ 0x00, 0x00, 0x02, 0x00 ];
 
-    let (_, chunk) = parse_chunk(data).unwrap();
+    let (_, chunk) = Chunk::parse(data).unwrap();
 
-    assert_eq!(chunk, Chunk { length: 0, typ: ChunkType::InitialiseVideo, body: &[] });
+    assert_eq!(chunk, Chunk { length: 0, typ: ChunkType::InitialiseVideo, data: &[] });
 }
 
 #[test]

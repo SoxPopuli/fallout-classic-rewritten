@@ -6,14 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-# Run command to get parser backtrace
-# cargo test --features parser_debug
-parser_debug = [ "winnow/debug" ]
 
 [dependencies]
+bitflags = "2.5.0"
 common = { path = "../common" }
 itertools = "0.10.5"
 nom = "7.1.3"
 tailcall = "0.1.6"
 tap = "1.0.1"
-winnow = "0.6.7" 

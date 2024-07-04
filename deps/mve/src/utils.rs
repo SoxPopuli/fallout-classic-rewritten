@@ -1,30 +1,37 @@
-pub(crate) trait MapPair<RetFirst, RetSecond> {
+pub(crate) trait MapPair {
     type A;
     type B;
-    type O;
-    fn map_first(self, f: impl FnOnce(Self::A) -> Self::O) -> RetFirst;
+    type Output<A, B>;
 
-    fn map_second(self, f: impl FnOnce(Self::B) -> Self::O) -> RetSecond;
+    fn map_first<C>(
+        self,
+        f: impl FnOnce(Self::A) -> C,
+    ) -> Self::Output<C, Self::B>;
+    fn map_second<C>(
+        self,
+        f: impl FnOnce(Self::B) -> C,
+    ) -> Self::Output<Self::A, C>;
 }
 
-impl<A, B, O, E> MapPair<Result<(O, B), E>, Result<(A, O), E>>
-    for Result<(A, B), E>
-{
+impl<A, B, E> MapPair for Result<(A, B), E> {
     type A = A;
     type B = B;
-    type O = O;
+    type Output<First, Second> = Result<(First, Second), E>;
 
-    fn map_first(self, f: impl FnOnce(Self::A) -> O) -> Result<(O, B), E> {
+    fn map_first<C>(
+        self,
+        f: impl FnOnce(Self::A) -> C,
+    ) -> Self::Output<C, Self::B> {
         match self {
             Ok((a, b)) => Ok((f(a), b)),
             Err(e) => Err(e),
         }
     }
 
-    fn map_second(
+    fn map_second<C>(
         self,
-        f: impl FnOnce(Self::B) -> Self::O,
-    ) -> Result<(A, O), E> {
+        f: impl FnOnce(Self::B) -> C,
+    ) -> Self::Output<Self::A, C> {
         match self {
             Ok((a, b)) => Ok((a, f(b))),
             Err(e) => Err(e),
@@ -32,36 +39,48 @@ impl<A, B, O, E> MapPair<Result<(O, B), E>, Result<(A, O), E>>
     }
 }
 
-impl<A, B, O> MapPair<Option<(O, B)>, Option<(A, O)>> for Option<(A, B)> {
+impl<A, B> MapPair for (A, B) {
     type A = A;
     type B = B;
-    type O = O;
+    type Output<First, Second> = (First, Second);
 
-    fn map_first(self, f: impl FnOnce(Self::A) -> Self::O) -> Option<(O, B)> {
+    fn map_first<C>(
+        self,
+        f: impl FnOnce(Self::A) -> C,
+    ) -> Self::Output<C, Self::B> {
+        (f(self.0), self.1)
+    }
+
+    fn map_second<C>(
+        self,
+        f: impl FnOnce(Self::B) -> C,
+    ) -> Self::Output<Self::A, C> {
+        (self.0, f(self.1))
+    }
+}
+
+impl<A, B> MapPair for Option<(A, B)> {
+    type A = A;
+    type B = B;
+    type Output<First, Second> = Option<(First, Second)>;
+
+    fn map_first<C>(
+        self,
+        f: impl FnOnce(Self::A) -> C,
+    ) -> Self::Output<C, Self::B> {
         match self {
             Some((a, b)) => Some((f(a), b)),
             None => None,
         }
     }
 
-    fn map_second(self, f: impl FnOnce(Self::B) -> Self::O) -> Option<(A, O)> {
+    fn map_second<C>(
+        self,
+        f: impl FnOnce(Self::B) -> C,
+    ) -> Self::Output<Self::A, C> {
         match self {
             Some((a, b)) => Some((a, f(b))),
             None => None,
         }
-    }
-}
-
-impl<A, B, O> MapPair<(O, B), (A, O)> for (A, B) {
-    type A = A;
-    type B = B;
-    type O = O;
-
-    fn map_first(self, f: impl FnOnce(Self::A) -> Self::O) -> (O, B) {
-        (f(self.0), self.1)
-    }
-
-    fn map_second(self, f: impl FnOnce(Self::B) -> Self::O) -> (A, O) {
-        (self.0, f(self.1))
     }
 }

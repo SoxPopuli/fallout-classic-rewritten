@@ -6,6 +6,7 @@ pub enum Error {
     FileError,
     ReadError(IoError),
     ChunkError(u16),
+    StreamMaskError(u16),
     ParseIncomplete,
     ParseError {
         input: String,
@@ -22,6 +23,9 @@ impl Display for Error {
             Self::ReadError(e) => write!(f, "ReadError: {e:?}"),
             Self::ChunkError(code) => {
                 write!(f, "ChunkError: unexpected chunk type {code}")
+            }
+            Self::StreamMaskError(code) => {
+                write!(f, "StreamMaskError: unexpected mask value {code}")
             }
             Self::ParseIncomplete => write!(f, "ParseIncomplete"),
             e @ Self::ParseError { .. } => write!(f, "{e:#?}"),
