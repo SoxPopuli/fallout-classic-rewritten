@@ -13,5 +13,5 @@ acm = { path = "../../deps/acm" }
 mve = { path = "../../deps/mve" }
 
 
-clap = { version = "3.2.20", features = ["derive"] }
+clap = { version = "4.5.48", features = ["derive"] }
 lodepng = "3.7.0"

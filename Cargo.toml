@@ -1,10 +1,12 @@
 [package]
 name = "fallout-classic-rewritten"
-version = "0.1.0"
-edition = "2021"
+resolver = "3"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [workspace]
+package.version = "0.1.0"
+package.edition = "2024"
+
 members = [
     "deps/common",
     "deps/acm",
@@ -15,7 +17,8 @@ members = [
 
     "tools/read-dat",
     "tools/read-pal",
-    "tools/read-file",
+    "tools/read-file", 
+    "tools/browser",
 ]
 
 [features]
