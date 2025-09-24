@@ -61,11 +61,14 @@ fn x2() {
             ffmpeg::codec::context::Context::from_parameters(video_stream.parameters()).unwrap();
 
         let mut decoder = context_decoder.decoder().video().unwrap();
-        let mut scaler = ffmpeg::software::scaler(
+        let mut scaler = ffmpeg::software::scaling::context::Context::get(
+            decoder.format(),
+            decoder.width(),
+            decoder.height(),
             ffmpeg::format::Pixel::RGB24,
+            decoder.width(),
+            decoder.height(),
             ffmpeg::software::scaling::Flags::BILINEAR,
-            (decoder.width(), decoder.height()),
-            (decoder.width(), decoder.height()),
         )
         .unwrap();
 
@@ -74,7 +77,6 @@ fn x2() {
         let mut rgb_frame = ffmpeg::util::frame::video::Video::empty();
 
         let frame_rate = rational_to_double(video_stream.rate());
-
 
         for (stream, packet) in input.packets() {
             if stream.index() == video_stream_index {
