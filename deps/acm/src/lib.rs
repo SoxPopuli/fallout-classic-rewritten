@@ -35,7 +35,7 @@ impl Acm {
 
     pub fn write_to_wav(&self) -> Result<Vec<u8>, AcmError> {
         let mut output = Vec::new();
-        let header = WavHeader::new(&self);
+        let header = WavHeader::new(self);
 
         output.extend_from_slice(&header.write()?);
         for s in &self.samples {
@@ -81,7 +81,7 @@ impl WavHeader {
     pub fn new(acm: &Acm) -> Self {
         let word_len = size_of::<SampleType>();
         let data_size = acm.samples.len() * word_len;
-        let bps = acm.sample_rate as u32 * acm.channels as u32 * word_len as u32;
+        let bps = acm.sample_rate * acm.channels * word_len as u32;
         let bits = word_len * 8;
         let alignment = bits * acm.channels as usize * 8;
 
@@ -103,9 +103,6 @@ impl WavHeader {
     }
 
     pub fn write(&self) -> Result<Vec<u8>, AcmError> {
-        trait Integer {}
-        impl Integer for u32 {}
-
         let mut output = Vec::new();
 
         write_array!(&self.riff, output)?;

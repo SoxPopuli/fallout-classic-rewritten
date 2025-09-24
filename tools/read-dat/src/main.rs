@@ -1,16 +1,11 @@
-use std::{ 
-    io::{ stdin, Read, Cursor, stdout, Write },
-    collections::hash_map::Entry,
-    env::{ Args, args },
+use std::{
+    env::{args, Args},
     fs::File,
+    io::{stdout, Read, Write},
     path::Path,
 };
 
-use dat::{ 
-    DatFile,
-    tree::FileState,
-    tree::Node,
-};
+use dat::{tree::FileState, DatFile};
 
 #[derive(Debug, Default, Clone)]
 struct Options {
@@ -25,8 +20,7 @@ struct Options {
 impl Options {
     fn new(args: &mut Args) -> Self {
         let mut this = Self::default();
-        let args: Vec<_> = args.into_iter()
-            .collect();
+        let args: Vec<_> = args.into_iter().collect();
 
         let mut i = 1;
         while i < args.len() {
@@ -35,21 +29,21 @@ impl Options {
             match arg.as_str() {
                 "--help" | "-h" => {
                     this.show_help = true;
-                },
+                }
                 "--extract" | "-e" => {
-                    this.output = Some(args[i+1].clone());
+                    this.output = Some(args[i + 1].clone());
                     i += 1;
-                },
+                }
                 "--file" | "-f" => {
                     this.file = Some(args[i + 1].clone());
                     i += 1;
-                },
+                }
                 "--unpack" | "-u" => {
                     this.unpack = true;
-                },
-                _ => { 
+                }
+                _ => {
                     this.input = Some(arg);
-                },
+                }
             }
 
             i += 1;
@@ -60,8 +54,12 @@ impl Options {
 }
 
 fn print_help() {
-    println!("{} [options] FILE", args().nth(0).unwrap_or("read-dat".into()));
-    println!("reads fallout 1/2 dat files from stdin");
+    println!(
+        "{} [options] FILE",
+        args().next().unwrap_or("read-dat".into())
+    );
+    println!("reads fallout 1/2 dat files");
+    println!("read-dat <options> [input]");
     println!();
 
     println!("-h --help                print help message");
@@ -70,8 +68,7 @@ fn print_help() {
     println!("-u --unpack              decompress file");
 }
 
-fn main()
-{
+fn main() {
     let mut args = std::env::args();
     let options = Options::new(&mut args);
 
@@ -80,17 +77,20 @@ fn main()
         return;
     }
 
-    //println!("{:?}", options.input);
-    //println!("{:?}", options.output);
-
-    let input = options.input.expect("missing input");
+    let input = options.input.unwrap_or_else(|| {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).map(|_| s).unwrap()
+    });
     let file = File::open(input).unwrap();
 
     let dat = DatFile::open(file).unwrap();
 
     if let Some(file) = options.file {
         let file = file.replace("/", "\\");
-        let entry = dat.registry.get(&file).expect(&format!("file not found: {}", file));
+        let entry = dat
+            .registry
+            .get(&file)
+            .unwrap_or_else(|| panic!("file not found: {}", file));
 
         let entry = {
             let lock = entry.read().unwrap();
@@ -101,7 +101,6 @@ fn main()
             true => dat.unpack_file(&entry).unwrap(),
             false => dat.get_entry_data(&entry).unwrap(),
         };
-
 
         stdout().write_all(&data).unwrap();
     } else if let Some(out) = options.output {
@@ -126,7 +125,7 @@ fn main()
     } else {
         let mut lines = vec![];
         for node in &dat.registry {
-            let name = node.get_name();
+            let _name = node.get_name();
             let path = node.get_path();
             let file = node.get_file_entry().unwrap();
 
@@ -139,6 +138,8 @@ fn main()
             lines.push(line);
         }
 
-        for l in lines { println!("{}", l); }
+        for l in lines {
+            println!("{}", l);
+        }
     }
 }

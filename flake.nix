@@ -10,6 +10,8 @@
       devShell = pkgs.mkShell {
         nativeBuildInputs = with pkgs; [
           clang
+          pkg-config
+          ffmpeg-full
         ];
 
         shellHook = ''

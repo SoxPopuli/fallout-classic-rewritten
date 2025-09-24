@@ -82,8 +82,6 @@ pub fn read_data(mut data: Cursor<Vec<u8>>, force_channels: Option<i32>) -> Resu
     };
 
     unsafe {
-        let acm;
-
         let mut acm_tmp = MaybeUninit::<*mut sys::ACMStream>::uninit();
         let acm_ptr = acm_tmp.as_mut_ptr();
         let data_ptr: *mut Cursor<Vec<u8>> = &mut data;
@@ -91,7 +89,7 @@ pub fn read_data(mut data: Cursor<Vec<u8>>, force_channels: Option<i32>) -> Resu
         if res < 0 {
             return Err(AcmError::StreamError);
         }
-        acm = acm_tmp.assume_init();
+        let acm = acm_tmp.assume_init();
 
         channels = sys::acm_channels(acm);
         sample_rate = sys::acm_rate(acm);
