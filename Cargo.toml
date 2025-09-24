@@ -14,6 +14,7 @@ members = [
     "deps/dat",
     "deps/pal",
     "deps/frm",
+    "deps/av",
 
     "tools/read-dat",
     "tools/read-file",

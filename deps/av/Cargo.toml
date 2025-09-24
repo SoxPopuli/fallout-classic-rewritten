@@ -1,0 +1,8 @@
+[package]
+name = "av"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+ez-ffmpeg = "0.5.4"

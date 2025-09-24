@@ -76,10 +76,10 @@ impl WavHeader {
         let alignment = bits * acm.channels as usize * 8;
 
         WavHeader {
-            riff: ['R', 'I', 'F', 'F'].map(|x| x as u8),
+            riff: [b'R', b'I', b'F', b'F'],
             size: (size_of::<WavHeader>() + data_size - 8) as u32,
-            wave: ['W', 'A', 'V', 'E'].map(|x| x as u8),
-            fmt:  ['f', 'm', 't', ' '].map(|x| x as u8),
+            wave: [b'W', b'A', b'V', b'E'],
+            fmt:  [b'f', b'm', b't', b' '],
             wave_size: 16,
             wave_type: 0x01,
             channels: acm.channels as u16,
@@ -98,7 +98,7 @@ fn open_mve(file: File) {
 }
 
 fn inspect_mve(file: File) {
-    let mve = mve::MveFile::open(file).unwrap();
+    // let mve = mve::MveFile::open(file).unwrap();
 }
 
 fn open_acm(file: File) {
