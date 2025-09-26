@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn x() {
+fn decode_video() {
     let input = include_bytes!("../../../../data/iplogo.mve");
 
     fn dp(x: f64, places: i32) -> f64 {
@@ -18,6 +18,17 @@ fn x() {
     assert_eq!(video.height, 320);
 
     assert_eq!(audio.samples.len(), 1324800);
+    assert_eq!(audio.format, AudioFormat::I16);
+    assert_eq!(audio.sample_rate, 22050);
+    assert_eq!(audio.channels, 2);
+}
+
+#[test]
+fn decode_audio() {
+    let input = include_bytes!("../../../../data/kill10a.acm");
+
+    let audio = State::new().acm(input).unwrap();
+    assert_eq!(audio.samples.len(), 144768);
     assert_eq!(audio.format, AudioFormat::I16);
     assert_eq!(audio.sample_rate, 22050);
     assert_eq!(audio.channels, 2);

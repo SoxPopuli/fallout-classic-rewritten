@@ -70,10 +70,16 @@ impl std::fmt::Debug for Audio {
 }
 
 impl Audio {
-    pub fn save_wav<W>(&self, mut writer: W) -> Result<(), Box<dyn std::error::Error>>
+    pub fn save_wav<W>(
+        &self,
+        mut writer: W,
+        force_channels: Option<u16>,
+    ) -> Result<(), Box<dyn std::error::Error>>
     where
         W: Write,
     {
+        let channels = force_channels.unwrap_or(self.channels as u16);
+
         // WAV header
         let data_size = self.samples.len() as u32;
         let file_size = 36 + data_size;
@@ -86,7 +92,7 @@ impl Audio {
         writer.write_all(b"fmt ")?;
         writer.write_all(&16u32.to_le_bytes())?; // fmt chunk size
         writer.write_all(&1u16.to_le_bytes())?; // PCM format
-        writer.write_all(&(self.channels as u16).to_le_bytes())?;
+        writer.write_all(&channels.to_le_bytes())?;
         writer.write_all(&self.sample_rate.to_le_bytes())?;
         writer.write_all(&(self.sample_rate * self.channels * 2).to_le_bytes())?; // byte rate
         writer.write_all(&((self.channels * 2) as u16).to_le_bytes())?; // block align
