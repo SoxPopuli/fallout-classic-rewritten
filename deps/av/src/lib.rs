@@ -394,9 +394,42 @@ impl State {
     }
 
     pub fn acm(&self, data: &[u8]) -> Result<Audio, ffmpeg::Error> {
-        let input = Input::from_buffer(BufferData::new(data))?;
+        let mut input = Input::from_buffer(BufferData::new(data))?;
 
-        todo!()
+        let (audio_stream, audio_stream_index) = {
+            let stream = AudioStream::from_input(&input.input).expect("Couldn't find audio stream");
+            let index = stream.0.index();
+
+            (stream, index)
+        };
+
+        let mut audio_context = AudioContext::new(&audio_stream)?;
+
+        let mut samples = vec![];
+
+        for (stream, packet) in input.input.packets() {
+            match stream.index() {
+                i if i == audio_stream_index => {
+                    audio_context
+                        .receive_packet_frames(&packet)?
+                        .for_each(|frame| samples.extend_from_slice(&frame));
+                }
+                _ => {}
+            }
+        }
+
+        audio_context
+            .receive_end_frames()?
+            .for_each(|frame| samples.extend_from_slice(&frame));
+
+        let audio = Audio {
+            format: AudioFormat::from_sample(&audio_context.decoder.format()),
+            samples,
+            sample_rate: audio_context.decoder.rate(),
+            channels: audio_context.decoder.channels() as u32,
+        };
+
+        Ok(audio)
     }
 }
 
