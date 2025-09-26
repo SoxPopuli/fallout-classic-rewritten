@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 common = { path = "../common" }
-ffmpeg-next = "8.0.0"
+ffmpeg-next = { version = "8.0.0", features = ["build", "static"] }
 
 [dev-dependencies]
 png = "0.18.0"

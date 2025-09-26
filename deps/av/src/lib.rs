@@ -3,12 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 #[cfg(test)]
 mod tests;
 
-use std::{
-    ffi::c_void,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
-    marker::PhantomData,
-    sync::{Arc, Mutex, Once},
-};
+use std::{ffi::c_void, io::Write, marker::PhantomData, sync::Once};
 
 static _INIT: Once = Once::new();
 
@@ -32,6 +27,7 @@ impl<'a> BufferData<'a> {
     }
 }
 
+#[derive(PartialEq)]
 pub struct Video {
     pub width: u32,
     pub height: u32,
@@ -55,12 +51,22 @@ impl Video {
     }
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq)]
 pub struct Audio {
     pub samples: Vec<u8>,
     pub sample_rate: u32,
     pub channels: u32,
     pub format: AudioFormat,
+}
+impl std::fmt::Debug for Audio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Audio")
+            .field("samples", &self.samples.len())
+            .field("sample_rate", &self.sample_rate)
+            .field("channels", &self.channels)
+            .field("format", &self.format)
+            .finish()
+    }
 }
 
 impl Audio {
@@ -95,14 +101,27 @@ impl Audio {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AudioFormat {
-    /// 16-bit signed integer
+    U8,
     I16,
-    /// 32-bit float
-    F32,
-    /// 32-bit signed integer
     I32,
+    I64,
+    F32,
+    F64,
+}
+impl AudioFormat {
+    fn from_sample(sample: &ffmpeg::format::Sample) -> Self {
+        match sample {
+            ffmpeg::format::Sample::None => panic!("no sample format"),
+            ffmpeg::format::Sample::U8(_) => AudioFormat::U8,
+            ffmpeg::format::Sample::I16(_) => AudioFormat::I16,
+            ffmpeg::format::Sample::I32(_) => AudioFormat::I32,
+            ffmpeg::format::Sample::I64(_) => AudioFormat::I64,
+            ffmpeg::format::Sample::F32(_) => AudioFormat::I32,
+            ffmpeg::format::Sample::F64(_) => AudioFormat::I64,
+        }
+    }
 }
 
 unsafe extern "C" fn read_packet(ptr: *mut c_void, buf: *mut u8, buf_size: i32) -> i32 {
@@ -163,176 +182,136 @@ unsafe extern "C" fn seek(ptr: *mut c_void, offset: i64, seek_mode: i32) -> i64 
     }
 }
 
-pub fn decode_audio_buffer(buffer: &[u8]) -> Result<Audio, ffmpeg::Error> {
-    let mut buffer_data = BufferData::new(buffer);
+struct AudioStream<'a>(ffmpeg::Stream<'a>);
+impl<'a> AudioStream<'a> {
+    fn from_input(input: &'a ffmpeg::format::context::Input) -> Option<Self> {
+        let stream = input.streams().best(ffmpeg::media::Type::Audio)?;
 
-    unsafe {
-        // Create AVIO context (same as video example)
-        let avio_buffer_size = 4096;
-        let avio_buffer = ffmpeg::ffi::av_malloc(avio_buffer_size) as *mut u8;
+        Some(Self(stream))
+    }
+}
 
-        let avio_ctx = ffmpeg::ffi::avio_alloc_context(
-            avio_buffer,
-            avio_buffer_size as i32,
-            0,
-            &mut buffer_data as *mut _ as *mut c_void,
-            Some(read_packet),
-            None,
-            Some(seek),
-        );
+struct VideoStream<'a>(ffmpeg::Stream<'a>);
+impl<'a> VideoStream<'a> {
+    fn from_input(input: &'a ffmpeg::format::context::Input) -> Option<Self> {
+        let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+        Some(Self(stream))
+    }
 
-        let mut format_ctx = ffmpeg::ffi::avformat_alloc_context();
-        (*format_ctx).pb = avio_ctx;
+    fn frame_rate(&self) -> f64 {
+        rational_to_double(self.0.rate())
+    }
+}
 
-        let ret = ffmpeg::ffi::avformat_open_input(
-            &mut format_ctx,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        );
+struct AudioContext {
+    decoder: ffmpeg::decoder::Audio,
+    frame: ffmpeg::frame::Audio,
+}
+impl AudioContext {
+    fn new(stream: &AudioStream) -> Result<Self, ffmpeg::Error> {
+        let context = ffmpeg::codec::Context::from_parameters(stream.0.parameters())?;
+        let decoder = context.decoder().audio()?;
 
-        if ret < 0 {
-            return Err(ffmpeg::Error::from(ret));
-        }
-
-        let ret = ffmpeg::ffi::avformat_find_stream_info(format_ctx, std::ptr::null_mut());
-        if ret < 0 {
-            return Err(ffmpeg::Error::from(ret));
-        }
-
-        // Find audio stream
-        let mut audio_stream_index = -1;
-        for i in 0..(*format_ctx).nb_streams {
-            let stream = *(*format_ctx).streams.add(i as usize);
-            if (*(*stream).codecpar).codec_type == ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_AUDIO {
-                audio_stream_index = i as i32;
-                break;
-            }
-        }
-
-        if audio_stream_index == -1 {
-            return Err(ffmpeg::Error::StreamNotFound);
-        }
-
-        let stream = *(*format_ctx).streams.add(audio_stream_index as usize);
-        let codecpar = (*stream).codecpar;
-
-        // Find audio decoder
-        let codec = ffmpeg::ffi::avcodec_find_decoder((*codecpar).codec_id);
-        if codec.is_null() {
-            return Err(ffmpeg::Error::DecoderNotFound);
-        }
-
-        let codec_ctx = ffmpeg::ffi::avcodec_alloc_context3(codec);
-        let ret = ffmpeg::ffi::avcodec_parameters_to_context(codec_ctx, codecpar);
-        if ret < 0 {
-            return Err(ffmpeg::Error::from(ret));
-        }
-
-        let ret = ffmpeg::ffi::avcodec_open2(codec_ctx, codec, std::ptr::null_mut());
-        if ret < 0 {
-            return Err(ffmpeg::Error::from(ret));
-        }
-
-        // Create resampler context
-        let swr_ctx = ffmpeg::ffi::swr_alloc();
-        ffmpeg::ffi::av_opt_set_int(
-            swr_ctx as *mut c_void,
-            c"in_channel_layout".as_ptr(),
-            match (*codecpar).ch_layout.nb_channels {
-                1 => ffmpeg::ffi::AV_CH_LAYOUT_MONO as i64,
-                2 => ffmpeg::ffi::AV_CH_LAYOUT_STEREO as i64,
-                x => panic!("Unexpected number of channels: {x}"),
-            },
-            0,
-        );
-        ffmpeg::ffi::av_opt_set_int(
-            swr_ctx as *mut c_void,
-            c"out_channel_layout".as_ptr(),
-            ffmpeg::ffi::AV_CH_LAYOUT_STEREO as i64,
-            0,
-        );
-        ffmpeg::ffi::av_opt_set_int(
-            swr_ctx as *mut c_void,
-            c"in_sample_rate".as_ptr(),
-            (*codec_ctx).sample_rate as i64,
-            0,
-        );
-        ffmpeg::ffi::av_opt_set_int(
-            swr_ctx as *mut c_void,
-            c"out_sample_rate".as_ptr(),
-            44100,
-            0,
-        );
-        ffmpeg::ffi::av_opt_set_sample_fmt(
-            swr_ctx as *mut c_void,
-            c"in_sample_fmt".as_ptr(),
-            (*codec_ctx).sample_fmt,
-            0,
-        );
-        ffmpeg::ffi::av_opt_set_sample_fmt(
-            swr_ctx as *mut c_void,
-            c"out_sample_fmt".as_ptr(),
-            ffmpeg::ffi::AVSampleFormat::AV_SAMPLE_FMT_S16,
-            0,
-        );
-
-        let ret = ffmpeg::ffi::swr_init(swr_ctx);
-        if ret < 0 {
-            return Err(ffmpeg::Error::from(ret));
-        }
-
-        let mut audio_data = Vec::new();
-        let frame = ffmpeg::ffi::av_frame_alloc();
-        let packet = ffmpeg::ffi::av_packet_alloc();
-
-        // Allocate output buffer
-        let max_out_samples = 4096;
-        let out_buffer_size = max_out_samples * 2 * 2; // 2 channels * 2 bytes per sample
-        let out_buffer = ffmpeg::ffi::av_malloc(out_buffer_size) as *mut i16;
-
-        while ffmpeg::ffi::av_read_frame(format_ctx, packet) >= 0 {
-            if (*packet).stream_index == audio_stream_index {
-                let ret = ffmpeg::ffi::avcodec_send_packet(codec_ctx, packet);
-                if ret < 0 {
-                    continue;
-                }
-
-                while ffmpeg::ffi::avcodec_receive_frame(codec_ctx, frame) >= 0 {
-                    // Resample
-                    let out_samples = ffmpeg::ffi::swr_convert(
-                        swr_ctx,
-                        &mut (out_buffer as *mut u8) as *mut *mut u8,
-                        max_out_samples as i32,
-                        (*frame).data.as_ptr() as *const *const u8,
-                        (*frame).nb_samples,
-                    );
-
-                    if out_samples > 0 {
-                        let samples_bytes = out_samples as usize * 2 * 2; // 2 channels * 2 bytes
-                        let sample_slice =
-                            std::slice::from_raw_parts(out_buffer as *const u8, samples_bytes);
-                        audio_data.extend_from_slice(sample_slice);
-                    }
-                }
-            }
-            ffmpeg::ffi::av_packet_unref(packet);
-        }
-
-        // Cleanup
-        ffmpeg::ffi::av_frame_free(&mut (frame as *mut _));
-        ffmpeg::ffi::av_packet_free(&mut (packet as *mut _));
-        ffmpeg::ffi::avcodec_free_context(&mut (codec_ctx as *mut _));
-        ffmpeg::ffi::swr_free(&mut (swr_ctx as *mut _));
-        ffmpeg::ffi::avformat_close_input(&mut (format_ctx as *mut _));
-        ffmpeg::ffi::av_free(out_buffer as *mut c_void);
-
-        Ok(Audio {
-            samples: audio_data,
-            sample_rate: 44100,
-            channels: 2,
-            format: AudioFormat::I16,
+        Ok(Self {
+            decoder,
+            frame: ffmpeg::frame::Audio::empty(),
         })
+    }
+
+    fn decode_frame(&mut self) -> Vec<u8> {
+        self.frame.data(0).to_vec()
+    }
+
+    /// **NOTE**: Remember to also get the end frames
+    fn receive_packet_frames<'a>(
+        &'a mut self,
+        packet: &ffmpeg::Packet,
+    ) -> Result<impl Iterator<Item = Vec<u8>> + use<'a>, ffmpeg::Error> {
+        self.decoder.send_packet(packet)?;
+
+        Ok(std::iter::from_fn(|| {
+            self.decoder
+                .receive_frame(&mut self.frame)
+                .map(|()| self.decode_frame())
+                .ok()
+        }))
+    }
+
+    fn receive_end_frames<'a>(
+        &'a mut self,
+    ) -> Result<impl Iterator<Item = Vec<u8>> + use<'a>, ffmpeg::Error> {
+        self.decoder.send_eof()?;
+
+        Ok(std::iter::from_fn(|| {
+            self.decoder
+                .receive_frame(&mut self.frame)
+                .map(|()| self.decode_frame())
+                .ok()
+        }))
+    }
+}
+
+struct VideoContext {
+    decoder: ffmpeg::decoder::Video,
+    scaler: ffmpeg::software::scaling::Context,
+    frame: ffmpeg::frame::Video,
+    rgb_frame: ffmpeg::frame::Video,
+}
+impl VideoContext {
+    fn new(stream: &VideoStream) -> Result<Self, ffmpeg::Error> {
+        let codec_params = stream.0.parameters();
+
+        let context = ffmpeg::codec::Context::from_parameters(codec_params)?;
+        let decoder = context.decoder().video()?;
+        let scaler = ffmpeg::software::scaling::context::Context::get(
+            decoder.format(),
+            decoder.width(),
+            decoder.height(),
+            ffmpeg::format::Pixel::RGB24,
+            decoder.width(),
+            decoder.height(),
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )?;
+
+        Ok(Self {
+            decoder,
+            scaler,
+            frame: ffmpeg::frame::Video::empty(),
+            rgb_frame: ffmpeg::frame::Video::empty(),
+        })
+    }
+
+    fn decode_frame(&mut self) -> Result<Vec<u8>, ffmpeg::Error> {
+        self.scaler.run(&self.frame, &mut self.rgb_frame)?;
+        Ok(extract_frame_data(&self.rgb_frame))
+    }
+
+    /// **NOTE**: Remember to also get the end frames
+    fn receive_packet_frames<'a>(
+        &'a mut self,
+        packet: &ffmpeg::Packet,
+    ) -> Result<impl Iterator<Item = Vec<u8>> + use<'a>, ffmpeg::Error> {
+        self.decoder.send_packet(packet)?;
+
+        Ok(std::iter::from_fn(|| {
+            self.decoder
+                .receive_frame(&mut self.frame)
+                .and_then(|()| self.decode_frame())
+                .ok()
+        }))
+    }
+
+    fn receive_end_frames<'a>(
+        &'a mut self,
+    ) -> Result<impl Iterator<Item = Vec<u8>> + use<'a>, ffmpeg::Error> {
+        self.decoder.send_eof()?;
+
+        Ok(std::iter::from_fn(|| {
+            self.decoder
+                .receive_frame(&mut self.frame)
+                .and_then(|()| self.decode_frame())
+                .ok()
+        }))
     }
 }
 
@@ -347,10 +326,91 @@ impl State {
         Self
     }
 
-    pub fn mve(&self, data: &[u8]) -> Result<Video, ffmpeg::Error> {
-        let mut buffer_data = BufferData::new(data);
+    pub fn mve(&self, data: &[u8]) -> Result<(Video, Audio), ffmpeg::Error> {
+        let mut input = Input::from_buffer(BufferData::new(data))?;
 
-        unsafe {
+        let (video_stream, video_stream_index) = {
+            let stream = VideoStream::from_input(&input.input).expect("Couldn't find video stream");
+            let index = stream.0.index();
+            (stream, index)
+        };
+
+        let (audio_stream, audio_stream_index) = {
+            let stream = AudioStream::from_input(&input.input).expect("Couldn't find audio stream");
+            let index = stream.0.index();
+
+            (stream, index)
+        };
+
+        let mut video_context = VideoContext::new(&video_stream)?;
+        let mut audio_context = AudioContext::new(&audio_stream)?;
+
+        let frame_rate = video_stream.frame_rate();
+
+        let mut frames = vec![];
+        let mut samples = vec![];
+
+        for (stream, packet) in input.input.packets() {
+            match stream.index() {
+                i if i == video_stream_index => {
+                    video_context
+                        .receive_packet_frames(&packet)?
+                        .for_each(|frame| {
+                            frames.push(frame);
+                        });
+                }
+                i if i == audio_stream_index => {
+                    audio_context
+                        .receive_packet_frames(&packet)?
+                        .for_each(|frame| samples.extend_from_slice(&frame));
+                }
+                _ => {}
+            }
+        }
+
+        video_context
+            .receive_end_frames()?
+            .for_each(|frame| frames.push(frame));
+
+        audio_context
+            .receive_end_frames()?
+            .for_each(|frame| samples.extend_from_slice(&frame));
+
+        let video = Video {
+            frames,
+            frame_rate,
+            width: video_context.decoder.width(),
+            height: video_context.decoder.height(),
+        };
+
+        let audio = Audio {
+            format: AudioFormat::from_sample(&audio_context.decoder.format()),
+            samples,
+            sample_rate: audio_context.decoder.rate(),
+            channels: audio_context.decoder.channels() as u32,
+        };
+
+        Ok((video, audio))
+    }
+
+    pub fn acm(&self, data: &[u8]) -> Result<Audio, ffmpeg::Error> {
+        let input = Input::from_buffer(BufferData::new(data))?;
+
+        todo!()
+    }
+}
+
+fn rational_to_double(x: ffmpeg::Rational) -> f64 {
+    x.numerator() as f64 / x.denominator() as f64
+}
+
+struct Input<'a> {
+    input: ffmpeg::format::context::Input,
+    __lifetime: std::marker::PhantomData<&'a [u8]>,
+}
+impl<'a> Input<'a> {
+    fn from_buffer(mut buffer_data: BufferData<'a>) -> Result<Self, ffmpeg::Error> {
+        let input = unsafe {
             let avio_buffer_size = 4096;
             let avio_buffer = ffmpeg::ffi::av_malloc(avio_buffer_size) as *mut u8;
 
@@ -373,130 +433,23 @@ impl State {
                 std::ptr::null(),
                 std::ptr::null_mut(),
             ) {
-                x if x < 0 => return Err(ffmpeg::Error::from(x)),
-                _ => {}
-            };
-
-            match ffmpeg::ffi::avformat_find_stream_info(format_ctx, std::ptr::null_mut()) {
-                x if x < 0 => return Err(ffmpeg::Error::from(x)),
-                _ => {}
-            }
-
-            let video_stream_index = (0..(*format_ctx).nb_streams)
-                .find(|x| {
-                    let stream = (*(*format_ctx).streams).add(*x as usize);
-                    (*(*stream).codecpar).codec_type == ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO
-                })
-                .ok_or(ffmpeg::Error::StreamNotFound)?;
-
-            let stream = (*(*format_ctx).streams).add(video_stream_index as usize);
-            let codecpar = (*stream).codecpar;
-            let fps = ffmpeg::ffi::av_q2d((*stream).r_frame_rate);
-
-            let codec = ffmpeg::ffi::avcodec_find_decoder((*codecpar).codec_id);
-            if codec.is_null() {
-                return Err(ffmpeg::Error::DecoderNotFound);
-            }
-
-            let codec_ctx = ffmpeg::ffi::avcodec_alloc_context3(codec);
-            match ffmpeg::ffi::avcodec_parameters_to_context(codec_ctx, codecpar) {
-                x if x < 0 => return Err(ffmpeg::Error::from(x)),
-                _ => {}
-            }
-
-            match ffmpeg::ffi::avcodec_open2(codec_ctx, codec, std::ptr::null_mut()) {
-                x if x < 0 => return Err(ffmpeg::Error::from(x)),
-                _ => {}
-            }
-
-            let sws_ctx = ffmpeg::ffi::sws_getContext(
-                (*codec_ctx).width,
-                (*codec_ctx).height,
-                (*codec_ctx).pix_fmt,
-                (*codec_ctx).width,
-                (*codec_ctx).height,
-                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGB24,
-                ffmpeg::ffi::SWS_BILINEAR,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-
-            let mut frames = vec![];
-            let frame = ffmpeg::ffi::av_frame_alloc();
-            let rgb_frame = ffmpeg::ffi::av_frame_alloc();
-
-            let num_bytes = ffmpeg::ffi::av_image_get_buffer_size(
-                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGB24,
-                (*codec_ctx).width,
-                (*codec_ctx).height,
-                1,
-            );
-
-            let buffer = ffmpeg::ffi::av_malloc(num_bytes as usize) as *mut u8;
-            ffmpeg::ffi::av_image_fill_arrays(
-                (*rgb_frame).data.as_mut_ptr(),
-                (*rgb_frame).linesize.as_mut_ptr(),
-                buffer,
-                ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGB24,
-                (*codec_ctx).width,
-                (*codec_ctx).height,
-                1,
-            );
-            let packet = ffmpeg::ffi::av_packet_alloc();
-
-            while ffmpeg::ffi::av_read_frame(format_ctx, packet) >= 0 {
-                if (*packet).stream_index == video_stream_index as i32 {
-                    match ffmpeg::ffi::avcodec_send_packet(codec_ctx, packet) {
-                        x if x < 0 => return Err(ffmpeg::Error::from(x)),
-                        _ => {}
+                0 => match ffmpeg::ffi::avformat_find_stream_info(format_ctx, std::ptr::null_mut())
+                {
+                    r if r >= 0 => Ok(ffmpeg::format::context::Input::wrap(format_ctx)),
+                    e => {
+                        ffmpeg::ffi::avformat_close_input(&mut format_ctx);
+                        Err(ffmpeg::Error::from(e))
                     }
-
-                    while ffmpeg::ffi::avcodec_receive_frame(codec_ctx, frame) >= 0 {
-                        ffmpeg::ffi::sws_scale(
-                            sws_ctx,
-                            (*frame).data.as_ptr() as *const *const u8,
-                            (*frame).linesize.as_ptr(),
-                            0,
-                            (*codec_ctx).height,
-                            (*rgb_frame).data.as_ptr(),
-                            (*rgb_frame).linesize.as_ptr(),
-                        );
-
-                        let frame_data = extract_rgb_frame_data(
-                            rgb_frame,
-                            (*codec_ctx).width,
-                            (*codec_ctx).height,
-                        );
-                        frames.push(frame_data);
-                    }
-                }
-                ffmpeg::ffi::av_packet_unref(packet);
+                },
+                e => Err(ffmpeg::Error::from(e)),
             }
+        }?;
 
-            let width = (*codec_ctx).width;
-            let height = (*codec_ctx).height;
-
-            // Cleanup
-            ffmpeg::ffi::av_frame_free(&mut (frame as *mut _));
-            ffmpeg::ffi::av_frame_free(&mut (rgb_frame as *mut _));
-            ffmpeg::ffi::av_packet_free(&mut (packet as *mut _));
-            ffmpeg::ffi::avcodec_free_context(&mut (codec_ctx as *mut _));
-            ffmpeg::ffi::sws_freeContext(sws_ctx);
-            ffmpeg::ffi::avformat_close_input(&mut (format_ctx as *mut _));
-            ffmpeg::ffi::av_free(buffer as *mut c_void);
-
-            Ok(Video {
-                width: width as u32,
-                height: height as u32,
-                frames,
-                frame_rate: fps,
-            })
-        }
-    }
-
-    pub fn acm(&self, data: &[u8]) {
-        todo!()
+        let this = Self {
+            input,
+            __lifetime: std::marker::PhantomData,
+        };
+        Ok(this)
     }
 }
 
@@ -516,29 +469,4 @@ fn extract_frame_data(frame: &ffmpeg::util::frame::video::Video) -> Vec<u8> {
     }
 
     data
-}
-
-unsafe fn extract_rgb_frame_data(
-    frame: *const ffmpeg::ffi::AVFrame,
-    width: i32,
-    height: i32,
-) -> Vec<u8> {
-    unsafe {
-        let mut data = Vec::new();
-        let bytes_per_pixel = 3; // RGB24
-        let linesize = (*frame).linesize[0] as usize;
-        let frame_data = (*frame).data[0];
-
-        for y in 0..height as usize {
-            let row_start = y * linesize;
-            let _row_end = row_start + (width as usize * bytes_per_pixel);
-            let row_slice = std::slice::from_raw_parts(
-                frame_data.add(row_start),
-                width as usize * bytes_per_pixel,
-            );
-            data.extend_from_slice(row_slice);
-        }
-
-        data
-    }
 }
