@@ -88,14 +88,16 @@ impl Audio {
         writer.write_all(&file_size.to_le_bytes())?;
         writer.write_all(b"WAVE")?;
 
+        let channel_width = self.format.byte_width() as u32;
+
         // fmt chunk
         writer.write_all(b"fmt ")?;
         writer.write_all(&16u32.to_le_bytes())?; // fmt chunk size
         writer.write_all(&1u16.to_le_bytes())?; // PCM format
         writer.write_all(&channels.to_le_bytes())?;
         writer.write_all(&self.sample_rate.to_le_bytes())?;
-        writer.write_all(&(self.sample_rate * self.channels * 2).to_le_bytes())?; // byte rate
-        writer.write_all(&((self.channels * 2) as u16).to_le_bytes())?; // block align
+        writer.write_all(&(self.sample_rate * channels as u32 * channel_width).to_le_bytes())?; // byte rate
+        writer.write_all(&(channels * channel_width as u16).to_le_bytes())?; // block align
         writer.write_all(&16u16.to_le_bytes())?; // bits per sample
 
         // data chunk
@@ -117,6 +119,17 @@ pub enum AudioFormat {
     F64,
 }
 impl AudioFormat {
+    fn byte_width(&self) -> u8 {
+        match self {
+            AudioFormat::U8 => 1,
+            AudioFormat::I16 => 2,
+            AudioFormat::I32 => 4,
+            AudioFormat::I64 => 8,
+            AudioFormat::F32 => 4,
+            AudioFormat::F64 => 8,
+        }
+    }
+
     fn from_sample(sample: &ffmpeg::format::Sample) -> Self {
         match sample {
             ffmpeg::format::Sample::None => panic!("no sample format"),
