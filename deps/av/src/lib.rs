@@ -27,44 +27,54 @@ impl<'a> BufferData<'a> {
     }
 }
 
-#[derive(PartialEq)]
-pub struct Video {
+pub type VideoFrames = Vec<Vec<u8>>;
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
-    pub frames: Vec<Vec<u8>>,
     pub frame_rate: f64,
+}
+
+#[derive(PartialEq)]
+pub struct Video {
+    pub info: VideoInfo,
+    pub frames: VideoFrames,
 }
 impl std::fmt::Debug for Video {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Video")
-            .field("width", &self.width)
-            .field("height", &self.height)
+            .field("info", &self.info)
             .field("frames", &self.frames.len())
-            .field("frame_rate", &self.frame_rate)
             .finish()
     }
 }
 impl Video {
     pub fn duration(&self) -> std::time::Duration {
-        let secs = self.frames.len() as f64 / self.frame_rate;
+        let secs = self.frames.len() as f64 / self.info.frame_rate;
         std::time::Duration::from_secs_f64(secs)
     }
 }
 
-#[derive(PartialEq, Eq)]
-pub struct Audio {
-    pub samples: Vec<u8>,
+#[derive(Debug, PartialEq, Eq)]
+pub struct AudioInfo {
     pub sample_rate: u32,
     pub channels: u32,
     pub format: AudioFormat,
+}
+
+pub type AudioSamples = Vec<u8>;
+
+#[derive(PartialEq, Eq)]
+pub struct Audio {
+    pub info: AudioInfo,
+    pub samples: AudioSamples,
 }
 impl std::fmt::Debug for Audio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Audio")
             .field("samples", &self.samples.len())
-            .field("sample_rate", &self.sample_rate)
-            .field("channels", &self.channels)
-            .field("format", &self.format)
+            .field("info", &self.info)
             .finish()
     }
 }
@@ -78,7 +88,7 @@ impl Audio {
     where
         W: Write,
     {
-        let channels = force_channels.unwrap_or(self.channels as u16);
+        let channels = force_channels.unwrap_or(self.info.channels as u16);
 
         // WAV header
         let data_size = self.samples.len() as u32;
@@ -88,15 +98,15 @@ impl Audio {
         writer.write_all(&file_size.to_le_bytes())?;
         writer.write_all(b"WAVE")?;
 
-        let channel_width = self.format.byte_width() as u32;
+        let channel_width = self.info.format.byte_width() as u32;
 
         // fmt chunk
         writer.write_all(b"fmt ")?;
         writer.write_all(&16u32.to_le_bytes())?; // fmt chunk size
         writer.write_all(&1u16.to_le_bytes())?; // PCM format
         writer.write_all(&channels.to_le_bytes())?;
-        writer.write_all(&self.sample_rate.to_le_bytes())?;
-        writer.write_all(&(self.sample_rate * channels as u32 * channel_width).to_le_bytes())?; // byte rate
+        writer.write_all(&self.info.sample_rate.to_le_bytes())?;
+        writer.write_all(&(self.info.sample_rate * channels as u32 * channel_width).to_le_bytes())?; // byte rate
         writer.write_all(&(channels * channel_width as u16).to_le_bytes())?; // block align
         writer.write_all(&16u16.to_le_bytes())?; // bits per sample
 
@@ -396,17 +406,21 @@ impl State {
             .for_each(|frame| samples.extend_from_slice(&frame));
 
         let video = Video {
+            info: VideoInfo {
+                frame_rate,
+                width: video_context.decoder.width(),
+                height: video_context.decoder.height(),
+            },
             frames,
-            frame_rate,
-            width: video_context.decoder.width(),
-            height: video_context.decoder.height(),
         };
 
         let audio = Audio {
-            format: AudioFormat::from_sample(&audio_context.decoder.format()),
+            info: AudioInfo {
+                format: AudioFormat::from_sample(&audio_context.decoder.format()),
+                sample_rate: audio_context.decoder.rate(),
+                channels: audio_context.decoder.channels() as u32,
+            },
             samples,
-            sample_rate: audio_context.decoder.rate(),
-            channels: audio_context.decoder.channels() as u32,
         };
 
         Ok((video, audio))
@@ -442,10 +456,12 @@ impl State {
             .for_each(|frame| samples.extend_from_slice(&frame));
 
         let audio = Audio {
-            format: AudioFormat::from_sample(&audio_context.decoder.format()),
             samples,
-            sample_rate: audio_context.decoder.rate(),
-            channels: audio_context.decoder.channels() as u32,
+            info: AudioInfo {
+                format: AudioFormat::from_sample(&audio_context.decoder.format()),
+                sample_rate: audio_context.decoder.rate(),
+                channels: audio_context.decoder.channels() as u32,
+            },
         };
 
         Ok(audio)

@@ -12,6 +12,7 @@
           clang
           pkg-config
           ffmpeg-full
+          nasm
         ];
 
         shellHook = ''

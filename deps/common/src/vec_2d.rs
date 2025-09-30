@@ -51,7 +51,7 @@ impl<T> Vec2d<T> {
         Some(elem)
     }
 
-    pub fn iter(&self) -> std::slice::Iter<T> {
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.data.iter()
     }
 }
@@ -72,9 +72,9 @@ impl<T> Vec2d<T> where T: Clone {
     pub fn from_slice(width: usize, height: usize, slice: &[T]) -> Self {
         let size = Self::calc_size(width, height);
         let mut data = Self::with_capacity(width, height);
-        for i in 0..size {
+        (0..size).for_each(|i| {
             data.push(slice[i].clone());
-        }
+        });
 
         Self { data, _width: width, _height: height }
     }
@@ -96,15 +96,11 @@ impl<T> PartialEq for Vec2d<T> where T: PartialEq {
 
         same_elems && same_width && same_height
     }
-
-    fn ne(&self, other: &Self) -> bool {
-        !self.eq(other)
-    }
 }
 
-impl<T> Into<Vec<T>> for Vec2d<T> {
-    fn into(self) -> Vec<T> {
-        self.data
+impl<T> From<Vec2d<T>> for Vec<T> {
+    fn from(val: Vec2d<T>) -> Self {
+        val.data
     }
 }
 
