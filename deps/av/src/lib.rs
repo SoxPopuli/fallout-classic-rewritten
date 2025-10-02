@@ -3,7 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 #[cfg(test)]
 mod tests;
 
-use std::{ffi::c_void, io::Write, marker::PhantomData, sync::Once};
+use std::{ffi::c_void, io::Write, marker::PhantomData, sync::Once, time::Duration};
 
 static _INIT: Once = Once::new();
 
@@ -106,7 +106,8 @@ impl Audio {
         writer.write_all(&1u16.to_le_bytes())?; // PCM format
         writer.write_all(&channels.to_le_bytes())?;
         writer.write_all(&self.info.sample_rate.to_le_bytes())?;
-        writer.write_all(&(self.info.sample_rate * channels as u32 * channel_width).to_le_bytes())?; // byte rate
+        writer
+            .write_all(&(self.info.sample_rate * channels as u32 * channel_width).to_le_bytes())?; // byte rate
         writer.write_all(&(channels * channel_width as u16).to_le_bytes())?; // block align
         writer.write_all(&16u16.to_le_bytes())?; // bits per sample
 
@@ -345,6 +346,24 @@ impl VideoContext {
 }
 
 #[derive(Debug)]
+pub struct VideoChannel {
+    pub info: VideoInfo,
+    pub channel: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub struct AudioChannel {
+    pub info: AudioInfo,
+    pub channel: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub struct AVChannel {
+    pub audio: AudioChannel,
+    pub video: VideoChannel,
+}
+
+#[derive(Debug)]
 pub struct State;
 
 #[allow(clippy::new_without_default)]
@@ -353,6 +372,86 @@ impl State {
         _INIT.call_once(|| ffmpeg::init().expect("Failed to init FFmpeg"));
 
         Self
+    }
+
+    pub fn mve_channel(&self, data: &[u8]) -> Result<AVChannel, ffmpeg::Error> {
+        let mut input = Input::from_buffer(BufferData::new(data))?;
+
+        let (video_stream, video_stream_index) = {
+            let stream = VideoStream::from_input(&input.input).expect("Couldn't find video stream");
+            let index = stream.0.index();
+            (stream, index)
+        };
+
+        let (audio_stream, audio_stream_index) = {
+            let stream = AudioStream::from_input(&input.input).expect("Couldn't find audio stream");
+            let index = stream.0.index();
+
+            (stream, index)
+        };
+
+        let mut video_context = VideoContext::new(&video_stream)?;
+        let mut audio_context = AudioContext::new(&audio_stream)?;
+
+        let frame_rate = video_stream.frame_rate();
+
+        let video_info = VideoInfo {
+            frame_rate,
+            width: video_context.decoder.width(),
+            height: video_context.decoder.height(),
+        };
+
+        let audio_info = AudioInfo {
+            format: AudioFormat::from_sample(&audio_context.decoder.format()),
+            sample_rate: audio_context.decoder.rate(),
+            channels: audio_context.decoder.channels() as u32,
+        };
+
+        let (video_tx, video_rx) = std::sync::mpsc::channel();
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+
+        let send_video_frame = |frame| {
+            video_tx.send(frame).expect("Failed to send video frame");
+        };
+
+        let send_audio_frame = |frame| {
+            audio_tx.send(frame).expect("Failed to send audio frame");
+        };
+
+        for (stream, packet) in input.input.packets() {
+            match stream.index() {
+                i if i == video_stream_index => {
+                    video_context
+                        .receive_packet_frames(&packet)?
+                        .for_each(send_video_frame);
+                }
+                i if i == audio_stream_index => {
+                    audio_context
+                        .receive_packet_frames(&packet)?
+                        .for_each(send_audio_frame);
+                }
+                _ => {}
+            }
+        }
+
+        video_context
+            .receive_end_frames()?
+            .for_each(send_video_frame);
+
+        audio_context
+            .receive_end_frames()?
+            .for_each(send_audio_frame);
+
+        Ok(AVChannel {
+            video: VideoChannel {
+                info: video_info,
+                channel: video_rx,
+            },
+            audio: AudioChannel {
+                info: audio_info,
+                channel: audio_rx,
+            },
+        })
     }
 
     pub fn mve(&self, data: &[u8]) -> Result<(Video, Audio), ffmpeg::Error> {
@@ -426,6 +525,53 @@ impl State {
         Ok((video, audio))
     }
 
+    pub fn acm_channel(&self, data: &[u8]) -> Result<AudioChannel, ffmpeg::Error> {
+        let mut input = Input::from_buffer(BufferData::new(data))?;
+
+        let (audio_stream, audio_stream_index) = {
+            let stream = AudioStream::from_input(&input.input).expect("Couldn't find audio stream");
+            let index = stream.0.index();
+
+            (stream, index)
+        };
+
+        let mut audio_context = AudioContext::new(&audio_stream)?;
+
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+
+        let audio_info = AudioInfo {
+            format: AudioFormat::from_sample(&audio_context.decoder.format()),
+            sample_rate: audio_context.decoder.rate(),
+            channels: audio_context.decoder.channels() as u32,
+        };
+
+        let send_audio_frame = |frame| {
+            audio_tx.send(frame).expect("Failed to send audio frame");
+        };
+
+        for (stream, packet) in input.input.packets() {
+            match stream.index() {
+                i if i == audio_stream_index => {
+                    audio_context
+                        .receive_packet_frames(&packet)?
+                        .for_each(send_audio_frame);
+                }
+                _ => {}
+            }
+        }
+
+        audio_context
+            .receive_end_frames()?
+            .for_each(send_audio_frame);
+
+        let audio = AudioChannel {
+            info: audio_info,
+            channel: audio_rx,
+        };
+
+        Ok(audio)
+    }
+
     pub fn acm(&self, data: &[u8]) -> Result<Audio, ffmpeg::Error> {
         let mut input = Input::from_buffer(BufferData::new(data))?;
 
@@ -477,6 +623,17 @@ struct Input<'a> {
     __lifetime: std::marker::PhantomData<&'a [u8]>,
 }
 impl<'a> Input<'a> {
+    #[allow(unused)]
+    fn duration(&self) -> Option<Duration> {
+        let duration = self.input.duration();
+        if duration < 0 {
+            None
+        } else {
+            let secs = self.input.duration() as f64 / ffmpeg::ffi::AV_TIME_BASE as f64;
+            Some(Duration::from_secs_f64(secs))
+        }
+    }
+
     fn from_buffer(mut buffer_data: BufferData<'a>) -> Result<Self, ffmpeg::Error> {
         let input = unsafe {
             let avio_buffer_size = 4096;

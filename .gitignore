@@ -7,3 +7,4 @@ dat_2.txt
 .gdb_history
 
 direnv/
+.direnv/
